@@ -10,6 +10,8 @@ from .database_models import (
     AuditLog
 )
 
+from .database_models import UserProfile
+
 __all__ = [
     'User',
     'Document',
@@ -19,3 +21,5 @@ __all__ = [
     'Feedback',
     'AuditLog'
 ]
+
+__all__.append('UserProfile')

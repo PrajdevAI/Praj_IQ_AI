@@ -8,7 +8,7 @@ from auth.session_manager import check_session_timeout, display_session_timer
 from config.env_validation import validate_env
 from config.database import get_tenant_db_session, resolve_or_create_user
 from config.settings import settings
-from models.database_models import User
+from models.database_models import User, UserProfile
 from services.document_service import DocumentService
 from services.chat_service import ChatService
 from services.rag_service import RAGService
@@ -62,9 +62,7 @@ st.markdown(
 
 
 def _extract_email_and_clerk_id(user_info: dict) -> tuple[str, str]:
-    """
-    Extract email + Clerk user id from whatever shape validate_session() returns.
-    """
+    """Extract email + Clerk user id from validate_session() result."""
     if not user_info:
         raise ValueError("user_info is empty")
 
@@ -85,26 +83,21 @@ def _extract_email_and_clerk_id(user_info: dict) -> tuple[str, str]:
     )
 
     if not clerk_user_id:
-        logger.info("clerk_user_id missing; will be generated from email in resolve_or_create_user")
+        logger.info("clerk_user_id missing; will be generated from email")
         clerk_user_id = None
 
     return email, clerk_user_id
 
 
 def _clear_user_session_state():
-    """
-    Clear ONLY user-specific session state (chat sessions, tenant info).
-    Does NOT clear auth state — that's handled by logout().
-    
-    This is critical for multi-tenant: when a different user logs in,
-    we must not carry over the previous user's session IDs.
-    """
+    """Clear user-specific session state on user switch."""
     keys_to_clear = [
         "current_session_id",
         "tenant_id",
         "user_id",
         "db_user_id",
         "chat_messages",
+        "profile_completed",
     ]
     for key in keys_to_clear:
         if key in st.session_state:
@@ -112,10 +105,191 @@ def _clear_user_session_state():
     logger.debug("Cleared user-specific session state")
 
 
+def _ensure_tables():
+    """Create all tables if they don't exist."""
+    try:
+        from config.database import Base, engine
+        from models import database_models  # noqa: F401
+        Base.metadata.create_all(bind=engine)
+        logger.info("Ensured database tables exist")
+    except Exception as e:
+        logger.warning("Could not ensure DB tables: %s", e)
+
+
+def _check_profile_exists(db, user_id) -> bool:
+    """Check if UserProfile exists for this user. Handles missing table."""
+    try:
+        profile = db.query(UserProfile).filter(UserProfile.user_id == user_id).first()
+        return profile is not None
+    except Exception as e:
+        msg = str(e).lower()
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+        if "user_profiles" in msg or "does not exist" in msg or "undefinedtable" in msg:
+            _ensure_tables()
+            try:
+                profile = db.query(UserProfile).filter(UserProfile.user_id == user_id).first()
+                return profile is not None
+            except Exception:
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+        return False
+
+
+def _send_profile_notification(first_name, last_name, company_email, phone_number, email, user_id):
+    """Send email notification about new user profile. Best-effort."""
+    body = (
+        f"New user profile submitted:\n\n"
+        f"First Name: {first_name}\n"
+        f"Last Name: {last_name}\n"
+        f"Company Email: {company_email}\n"
+        f"Phone: {phone_number or 'N/A'}\n"
+        f"Login Email: {email}\n"
+        f"User ID: {user_id}\n"
+    )
+    try:
+        import utils.email_sender as _es
+        _es.email_sender.send_email(
+            to_email="dev@acadiaconsultants.com",
+            subject="New user profile submitted",
+            body_text=body,
+        )
+        logger.info("Profile notification email sent for user %s", str(user_id)[:8])
+    except Exception as e:
+        logger.warning("Failed to send profile notification email: %s", e)
+
+
+def _save_profile(email, clerk_user_id, user_id, first_name, last_name, company_email, phone_number):
+    """Save UserProfile to DB. Returns True on success."""
+    for attempt in range(2):
+        db = None
+        try:
+            db = get_tenant_db_session(email, clerk_user_id)
+            new_profile = UserProfile(
+                user_id=user_id,
+                first_name=first_name.strip(),
+                last_name=last_name.strip(),
+                company_email=company_email.strip(),
+                phone_number=phone_number.strip() or None,
+            )
+            db.add(new_profile)
+            db.commit()
+            logger.info("✅ Profile saved for user %s", str(user_id)[:8])
+            return True
+        except Exception as e:
+            msg = str(e).lower()
+            if db:
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+
+            if attempt == 0 and ("user_profiles" in msg or "does not exist" in msg or "undefinedtable" in msg):
+                _ensure_tables()
+                continue
+            
+            logger.error("Failed to save profile (attempt %d): %s", attempt + 1, e)
+            raise
+        finally:
+            if db:
+                try:
+                    db.close()
+                except Exception:
+                    pass
+    return False
+
+
+def _show_profile_form(email, clerk_user_id, user_id):
+    """
+    Show mandatory profile form for first-time users.
+    Calls st.stop() if form not yet submitted.
+    Calls st.rerun() after successful save.
+    """
+    st.title("📋 Complete Your Profile")
+    st.markdown("Please fill in your details before continuing to the PDF chat.")
+    st.markdown("")
+
+    with st.form(key="mandatory_profile_form"):
+        col1, col2 = st.columns(2)
+        with col1:
+            first_name = st.text_input("First Name *", value="", placeholder="John")
+        with col2:
+            last_name = st.text_input("Last Name *", value="", placeholder="Doe")
+        
+        company_email = st.text_input(
+            "Company Email *", 
+            value=email, 
+            placeholder="john.doe@company.com"
+        )
+        phone_number = st.text_input(
+            "Phone Number (optional)", 
+            value="", 
+            placeholder="+1-555-123-4567"
+        )
+        
+        st.markdown("")
+        submitted = st.form_submit_button("Submit and Continue", use_container_width=True)
+
+    if not submitted:
+        st.info("Please complete the form above to access the PDF chat.")
+        st.stop()
+        return
+
+    # Validate
+    errors = []
+    if not first_name.strip():
+        errors.append("First Name is required.")
+    if not last_name.strip():
+        errors.append("Last Name is required.")
+    if not company_email.strip():
+        errors.append("Company Email is required.")
+
+    if errors:
+        for err in errors:
+            st.error(err)
+        st.stop()
+        return
+
+    # Save profile to DB
+    try:
+        _save_profile(
+            email=email,
+            clerk_user_id=clerk_user_id,
+            user_id=user_id,
+            first_name=first_name,
+            last_name=last_name,
+            company_email=company_email,
+            phone_number=phone_number,
+        )
+    except Exception as e:
+        st.error(f"Failed to save profile: {e}")
+        st.stop()
+        return
+
+    # Send notification email (best-effort)
+    _send_profile_notification(
+        first_name=first_name.strip(),
+        last_name=last_name.strip(),
+        company_email=company_email.strip(),
+        phone_number=phone_number.strip(),
+        email=email,
+        user_id=user_id,
+    )
+
+    st.success("✅ Profile saved! Redirecting to the PDF chat...")
+    st.session_state["profile_completed"] = True
+    st.rerun()
+
+
 def main():
     """Main application entry point."""
 
-    # 1) Validate environment variables
+    # 1) Validate environment
     try:
         validate_env()
     except Exception as e:
@@ -123,24 +297,25 @@ def main():
         st.error(f"Environment validation failed: {e}")
         st.stop()
 
+    # Ensure DB tables exist
+    _ensure_tables()
+
     # 2) Initialize auth manager
     auth_manager = ClerkAuthManager()
 
-    # 3) Handle logout FIRST — clear EVERYTHING and redirect to login
+    # 3) Handle logout
     if st.session_state.get("force_logout", False):
         logger.info("Processing logout request")
         try:
             auth_manager.logout()
         except Exception as e:
             logger.warning("Logout error (continuing): %s", e)
-
         st.query_params.clear()
         st.session_state.clear()
         st.rerun()
 
-    # 4) Validate/get user session from Clerk
+    # 4) Validate user session
     user_info = auth_manager.validate_session()
-
     if not user_info:
         logger.info("User not authenticated, showing login page")
         show_login_page()
@@ -156,55 +331,62 @@ def main():
         st.rerun()
         return
 
-    # =========================================================================
-    # 6) MULTI-TENANT FIX: Detect user switch and clear stale session state
-    # =========================================================================
-    # If the email changed since last render, a different user logged in.
-    # We MUST clear the previous user's session_id, tenant context, etc.
+    # 6) Detect user switch
     previous_email = st.session_state.get("email")
     if previous_email and previous_email != email:
-        logger.info(
-            "🔄 User switch detected: %s → %s. Clearing previous session state.",
-            previous_email[:15], email[:15]
-        )
+        logger.info("🔄 User switch: %s → %s", previous_email[:15], email[:15])
         _clear_user_session_state()
 
     st.session_state["email"] = email
     logger.info("User authenticated: %s", email[:20])
 
-    # =========================================================================
-    # 7) Resolve user in DB (find existing or create new)
-    #    This is the SINGLE source of truth for user_id and tenant_id.
-    # =========================================================================
+    # 7) Resolve user in DB
     try:
         user_obj, tenant_id_str = resolve_or_create_user(
-            email=email, 
-            clerk_user_id=clerk_user_id
+            email=email, clerk_user_id=clerk_user_id
         )
         tenant_id = uuid.UUID(tenant_id_str) if isinstance(tenant_id_str, str) else tenant_id_str
         user_id = user_obj.user_id
-        
-        logger.info(
-            "✅ Resolved user: email=%s user_id=%s tenant_id=%s",
-            email[:15], str(user_id)[:8], str(tenant_id)[:8]
-        )
+        logger.info("✅ Resolved user: %s user_id=%s", email[:15], str(user_id)[:8])
     except Exception as e:
         logger.error("Failed to resolve user: %s", e, exc_info=True)
         st.error(f"❌ Failed to resolve user account: {e}")
         st.stop()
         return
 
-    # Store resolved IDs in session state for debugging / other components
     st.session_state["user_id"] = str(user_id)
     st.session_state["tenant_id"] = str(tenant_id)
 
     # =========================================================================
-    # 8) Create tenant-aware DB session with RLS context
+    # 8) PROFILE GATE: New users must complete profile before accessing chat
     # =========================================================================
     db = get_tenant_db_session(email, clerk_user_id)
 
     try:
-        # 9) Verify RLS context (dev only)
+        # Check session_state cache first (avoids DB query on every rerun)
+        profile_completed = st.session_state.get("profile_completed", False)
+
+        if not profile_completed:
+            # Query DB
+            profile_completed = _check_profile_exists(db, user_id)
+            st.session_state["profile_completed"] = profile_completed
+
+        if not profile_completed:
+            # Close DB session — form handler opens its own
+            try:
+                db.close()
+            except Exception:
+                pass
+            
+            # Show form — this calls st.stop() or st.rerun() internally
+            _show_profile_form(email, clerk_user_id, user_id)
+            return
+
+        # =====================================================================
+        # 9) MAIN APP — User has completed profile
+        # =====================================================================
+        
+        # Verify RLS context (dev only)
         if settings.ENVIRONMENT == "development":
             try:
                 from sqlalchemy import text
@@ -212,27 +394,17 @@ def main():
                     text("SELECT current_setting('app.current_tenant_id', true)")
                 ).scalar()
                 if tenant_check:
-                    logger.debug(
-                        "RLS tenant context verified: %s (expected: %s)",
-                        tenant_check[:8], str(tenant_id)[:8]
-                    )
-                else:
-                    logger.warning("⚠️ RLS tenant context is NULL!")
+                    logger.debug("RLS context verified: %s", tenant_check[:8])
             except Exception as e:
-                logger.warning("Could not verify RLS tenant context: %s", e)
+                logger.warning("Could not verify RLS context: %s", e)
 
-        # =====================================================================
-        # 10) Initialize services — using the RESOLVED user_id and tenant_id
-        #     NOT re-querying the User table (avoids the clerk_user_id mismatch)
-        # =====================================================================
+        # 10) Initialize services
         doc_service = DocumentService(db, tenant_id)
         rag_service = RAGService(db, tenant_id)
         chat_service = ChatService(db, tenant_id, user_id)
         feedback_service = FeedbackService(db, tenant_id, user_id)
 
-        # =====================================================================
         # 11) UI
-        # =====================================================================
         st.title("📄 Secure PDF Chat")
         st.caption("Ask questions about your uploaded documents")
 
@@ -244,7 +416,6 @@ def main():
                 if st.button("🚪 Logout", use_container_width=True):
                     st.session_state["force_logout"] = True
                     st.rerun()
-
             st.markdown("---")
             render_sidebar(doc_service, chat_service, user_id)
 
@@ -263,43 +434,26 @@ def main():
         with col2:
             st.markdown("### 💬 Chat")
             try:
-                # =============================================================
-                # MULTI-TENANT FIX: Validate that current_session_id belongs
-                # to THIS user before using it. If it belongs to a different
-                # user (from a previous login), discard it.
-                # =============================================================
                 current_session_id = st.session_state.get("current_session_id")
                 session_id = None
                 
                 if current_session_id:
                     try:
                         session_uuid = uuid.UUID(current_session_id)
-                        # Verify this session belongs to the current user
                         existing_session = chat_service.get_session_by_id(session_uuid)
                         if existing_session:
                             session_id = session_uuid
-                            logger.debug("Loaded existing session: %s", str(session_id)[:8])
                         else:
-                            # Session doesn't belong to this user (RLS filtered it out)
-                            # or it was deleted. Clear it.
-                            logger.info(
-                                "⚠️ Stored session %s not found for current user. "
-                                "Creating new session.",
-                                current_session_id[:8]
-                            )
                             del st.session_state["current_session_id"]
-                            current_session_id = None
                     except (ValueError, Exception) as e:
-                        logger.warning("Invalid session_id in state: %s", e)
-                        del st.session_state["current_session_id"]
-                        current_session_id = None
+                        logger.warning("Invalid session_id: %s", e)
+                        if "current_session_id" in st.session_state:
+                            del st.session_state["current_session_id"]
 
                 if session_id is None:
-                    # Get the user's most recent active session, or create one
                     session = chat_service.get_active_session()
                     session_id = session.session_id
                     st.session_state["current_session_id"] = str(session_id)
-                    logger.info("Using session: %s", str(session_id)[:8])
                 
                 render_chat_interface(chat_service, rag_service, session_id)
             except Exception as e:
@@ -309,14 +463,13 @@ def main():
         st.markdown("---")
         st.success("✅ **Status:** Authenticated & Connected")
 
-        # Dev debug panel
         if settings.ENVIRONMENT == "development":
             with st.expander("🔍 Debug: Multi-Tenant Info"):
                 st.write(f"**Email:** {email}")
                 st.write(f"**User ID:** {str(user_id)[:8]}...")
                 st.write(f"**Tenant ID:** {str(tenant_id)[:8]}...")
                 st.write(f"**Session ID:** {st.session_state.get('current_session_id', 'none')[:8]}...")
-                st.write(f"**Clerk User ID:** {clerk_user_id[:20] if clerk_user_id else 'None'}...")
+                st.write(f"**Profile:** ✅ Completed")
 
     except Exception as e:
         logger.error("Application error: %s", e, exc_info=True)

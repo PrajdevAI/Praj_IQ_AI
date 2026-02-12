@@ -264,3 +264,22 @@ class AuditLog(Base):
 
     def __repr__(self):
         return f"<AuditLog(log_id={self.log_id}, action={self.action})>"
+
+
+class UserProfile(Base):
+    """Stores optional profile details collected once after verification."""
+
+    __tablename__ = "user_profiles"
+
+    profile_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.user_id", ondelete="CASCADE"), nullable=False, unique=True, index=True)
+
+    first_name = Column(String(120), nullable=False)
+    last_name = Column(String(120), nullable=False)
+    company_email = Column(String(255), nullable=False)
+    phone_number = Column(String(50), nullable=True)
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    def __repr__(self):
+        return f"<UserProfile(user_id={self.user_id}, company_email={self.company_email})>"
