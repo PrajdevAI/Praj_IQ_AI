@@ -1,0 +1,16 @@
+.env
+.env.local
+*.pem
+__pycache__/
+.venv/
+venv/
+*.pyc
+.env.example
+node_modules/
+.next/
+out/
+dist/
+build/
+**/node_modules/
+**/.next/
+
