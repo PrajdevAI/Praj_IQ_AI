@@ -12,6 +12,7 @@ from security.encryption import encryption_manager
 from config.settings import settings
 from config.database import ensure_tenant_context
 from security.audit_logger import log_action
+from services.storage_service import StorageService
 
 logger = logging.getLogger(__name__)
 
@@ -35,14 +36,7 @@ class DeleteService:
         1) Remove from S3
         2) Delete from vector store (via document_chunks soft-delete)
         3) Soft-delete or hard-delete document metadata
-        
-        Args:
-            doc_id: Document ID to delete
-            user_id: User performing deletion (for permission check)
-            hard_delete: If True, permanently delete from DB; else soft-delete via is_deleted flag
-            
-        Returns:
-            True if deletion successful, False otherwise
+        4) Update tenant storage tracking
         """
         try:
             # Verify document exists and user has permission
@@ -58,6 +52,9 @@ class DeleteService:
                 return False
             
             logger.info(f"Starting deletion process for document {doc_id} (tenant: {self.tenant_id})")
+            
+            # Capture file size before deletion for storage tracking
+            file_size_bytes = doc.file_size_bytes or 0
             
             # Step 1: Get S3 key for deletion
             data_key = encryption_manager.get_or_create_dek(str(self.tenant_id))
@@ -78,8 +75,7 @@ class DeleteService:
                     logger.error(f"❌ S3 deletion failed: {str(e)}")
                     return False
             
-            # Step 3: Delete chunks from DB (this also soft-deletes vector embeddings)
-            # In pgvector, chunks are stored in document_chunks table, so delete them
+            # Step 3: Delete chunks from DB
             deleted_chunk_count = self._delete_chunks(doc_id)
             logger.info(f"✅ Deleted {deleted_chunk_count} chunks from database")
             
@@ -87,15 +83,21 @@ class DeleteService:
             ensure_tenant_context(self.db)
             
             if hard_delete:
-                # Permanently delete document record
                 self.db.delete(doc)
                 logger.info(f"✅ Hard-deleted document metadata: {doc_id}")
             else:
-                # Soft-delete: set is_deleted flag
                 doc.is_deleted = True
                 logger.info(f"✅ Soft-deleted document metadata: {doc_id}")
             
             self.db.commit()
+            
+            # Step 5: Update storage tracking
+            try:
+                storage_svc = StorageService(self.db, self.tenant_id)
+                storage_svc.record_delete(file_size_bytes)
+                self.db.commit()
+            except Exception as storage_err:
+                logger.warning(f"Storage tracking update failed (non-blocking): {storage_err}")
             
             # Log audit
             log_action(
@@ -116,19 +118,8 @@ class DeleteService:
             return False
     
     def _delete_chunks(self, doc_id: uuid.UUID) -> int:
-        """
-        Delete all chunks for a document from the vector store.
-        
-        For pgvector: delete from document_chunks table
-        
-        Args:
-            doc_id: Document ID
-            
-        Returns:
-            Number of chunks deleted
-        """
+        """Delete all chunks for a document."""
         try:
-            # Count chunks before deletion
             count = self.db.query(DocumentChunk).filter(
                 DocumentChunk.document_id == doc_id,
                 DocumentChunk.tenant_id == self.tenant_id
@@ -138,7 +129,6 @@ class DeleteService:
                 logger.info(f"No chunks found for document {doc_id}")
                 return 0
             
-            # Delete all chunks for this document + tenant
             deleted = self.db.query(DocumentChunk).filter(
                 DocumentChunk.document_id == doc_id,
                 DocumentChunk.tenant_id == self.tenant_id
@@ -155,16 +145,7 @@ class DeleteService:
             return 0
     
     def get_document_deletion_info(self, doc_id: uuid.UUID, user_id: uuid.UUID) -> dict:
-        """
-        Get deletion info for logging/audit purposes.
-        
-        Args:
-            doc_id: Document ID
-            user_id: User ID
-            
-        Returns:
-            Dict with document metadata for deletion log
-        """
+        """Get deletion info for logging/audit purposes."""
         doc = self.db.query(Document).filter(
             Document.document_id == doc_id,
             Document.tenant_id == self.tenant_id,

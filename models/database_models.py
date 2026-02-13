@@ -30,18 +30,12 @@ class User(Base):
 
     user_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
 
-    # ✅ Primary identity from Clerk (should NOT be nullable)
     clerk_user_id = Column(String(255), unique=True, nullable=False, index=True)
 
-    # ✅ Encrypted-only email storage (BYTEA)
-    # Store deterministic HMAC bytes here (32 bytes)
     email_encrypted = Column(LargeBinary, unique=True, nullable=False, index=True)
 
-    # ✅ Tenant id (generated per user)
     tenant_id = Column(UUID(as_uuid=True), unique=True, nullable=False, default=uuid.uuid4, index=True)
 
-    # 🚫 Plaintext email is optional (keep only if you need it for UI / migration)
-    # Since you want encrypted-only, keep it nullable and stop using it in code.
     email = Column(String(255), unique=True, nullable=True, index=True)
 
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -63,12 +57,11 @@ class User(Base):
     feedback = relationship("Feedback", back_populates="user", cascade="all, delete-orphan")
 
     def __repr__(self):
-        # Avoid printing plaintext email; it may be null anyway
         return f"<User(clerk_user_id={self.clerk_user_id}, tenant_id={self.tenant_id})>"
 
 
 class Document(Base):
-    """Document model for uploaded PDFs."""
+    """Document model for uploaded files."""
 
     __tablename__ = "documents"
 
@@ -276,6 +269,7 @@ class UserProfile(Base):
 
     first_name = Column(String(120), nullable=False)
     last_name = Column(String(120), nullable=False)
+    company_name = Column(String(255), nullable=False, default="")
     company_email = Column(String(255), nullable=False)
     phone_number = Column(String(50), nullable=True)
 
@@ -283,3 +277,64 @@ class UserProfile(Base):
 
     def __repr__(self):
         return f"<UserProfile(user_id={self.user_id}, company_email={self.company_email})>"
+
+
+class TenantStorage(Base):
+    """
+    Tracks per-tenant storage usage in S3.
+    
+    Updated on every document upload and delete.
+    Designed for future threshold-based alerts and billing.
+    """
+
+    __tablename__ = "tenant_storage"
+
+    storage_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("users.tenant_id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+
+    # Current usage
+    total_bytes = Column(BigInteger, nullable=False, default=0)
+    document_count = Column(Integer, nullable=False, default=0)
+
+    # High-water mark for billing/analytics
+    peak_bytes = Column(BigInteger, nullable=False, default=0)
+
+    # Alert tracking
+    last_alert_sent_at = Column(DateTime, nullable=True)
+    alert_threshold_bytes = Column(
+        BigInteger, nullable=False, default=53_687_091_200  # 50 GB
+    )
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        Index("idx_tenant_storage_tenant", "tenant_id"),
+    )
+
+    @property
+    def total_mb(self) -> float:
+        return round(self.total_bytes / (1024 * 1024), 2)
+
+    @property
+    def total_gb(self) -> float:
+        return round(self.total_bytes / (1024 * 1024 * 1024), 4)
+
+    @property
+    def usage_percent(self) -> float:
+        """Percentage of alert threshold used."""
+        if self.alert_threshold_bytes == 0:
+            return 0.0
+        return round((self.total_bytes / self.alert_threshold_bytes) * 100, 2)
+
+    def __repr__(self):
+        return (
+            f"<TenantStorage(tenant_id={self.tenant_id}, "
+            f"total={self.total_mb}MB, docs={self.document_count})>"
+        )

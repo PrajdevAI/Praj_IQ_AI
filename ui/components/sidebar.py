@@ -7,8 +7,31 @@ from datetime import datetime
 from services.document_service import DocumentService
 from services.chat_service import ChatService
 from models.database_models import ChatSession
+from utils.file_parser import UPLOAD_EXTENSIONS
 
 logger = logging.getLogger(__name__)
+
+
+# File type icons for display
+FILE_ICONS = {
+    ".pdf": "📄",
+    ".docx": "📝", ".doc": "📝",
+    ".xlsx": "📊", ".xls": "📊",
+    ".csv": "📊", ".tsv": "📊",
+    ".txt": "📃", ".md": "📃", ".log": "📃",
+    ".json": "🔧", ".xml": "🔧", ".yaml": "🔧", ".yml": "🔧",
+    ".html": "🌐", ".htm": "🌐",
+    ".png": "🖼️", ".jpg": "🖼️", ".jpeg": "🖼️",
+    ".tiff": "🖼️", ".tif": "🖼️", ".bmp": "🖼️", ".webp": "🖼️",
+    ".svg": "🖼️",
+}
+
+
+def _get_file_icon(filename: str) -> str:
+    """Get an emoji icon for the file type."""
+    import os
+    ext = os.path.splitext(filename.lower())[1]
+    return FILE_ICONS.get(ext, "📎")
 
 
 def render_sidebar(doc_service: DocumentService, chat_service: ChatService, user_id: uuid.UUID):
@@ -31,7 +54,6 @@ def render_sidebar(doc_service: DocumentService, chat_service: ChatService, user
             try:
                 new_session = chat_service.create_session()
                 st.session_state["current_session_id"] = str(new_session.session_id)
-                # Auto-title will be set from first message
                 st.success("✅ New conversation created")
                 st.rerun()
             except Exception as e:
@@ -52,13 +74,11 @@ def render_sidebar(doc_service: DocumentService, chat_service: ChatService, user
                 title = session["title"]
                 last_msg_at = session["last_message_at"]
                 
-                # Format timestamp
                 if last_msg_at:
                     time_str = last_msg_at.strftime("%b %d, %H:%M")
                 else:
                     time_str = "Just now"
                 
-                # Highlight current session
                 is_current = session_id == current_session
                 prefix = "✓ " if is_current else "  "
                 
@@ -75,13 +95,11 @@ def render_sidebar(doc_service: DocumentService, chat_service: ChatService, user
                 with col2:
                     if st.button("✕", key=f"del_conv_{session_id}", help="Delete chat"):
                         try:
-                            # Mark as deleted (soft delete)
                             chat_service.db.query(ChatSession).filter(
                                 ChatSession.session_id == uuid.UUID(session_id)
                             ).update({"is_deleted": True})
                             chat_service.db.commit()
                             
-                            # If deleting current conversation, switch to another
                             if is_current and sessions:
                                 for s in sessions:
                                     if s["session_id"] != session_id:
@@ -101,80 +119,117 @@ def render_sidebar(doc_service: DocumentService, chat_service: ChatService, user
     st.sidebar.divider()
     
     # ========== DOCUMENTS SECTION ==========
-    st.sidebar.title("📄 Documents")
+    st.sidebar.title("📁 Documents")
     
-    # Document upload section
-    st.sidebar.subheader("Upload PDF")
-    uploaded_file = st.sidebar.file_uploader(
-        "Choose a PDF file",
-        type=['pdf'],
-        help="Max 50MB per file",
-        key="pdf_uploader"
+    # Document upload section — now supports multiple file types
+    st.sidebar.subheader("Upload Documents")
+    
+    # Strip the leading dots for Streamlit's file_uploader
+    upload_types = [ext.lstrip('.') for ext in UPLOAD_EXTENSIONS]
+    
+    # Dynamic key to clear file selection after upload
+    uploader_key = f"file_uploader_{st.session_state.get('uploader_key', 0)}"
+    
+    uploaded_files = st.sidebar.file_uploader(
+        "Choose files to upload",
+        type=upload_types,
+        accept_multiple_files=True,
+        help="Select one or more files. Supported: PDF, Word, Excel, CSV, Text, Images (max 50MB each)",
+        key=uploader_key
     )
     
-    if uploaded_file is not None:
-        if st.sidebar.button("Upload", key="upload_btn"):
-            try:
-                with st.spinner("Uploading and processing document..."):
+    if uploaded_files:
+        # Show selected files summary
+        total_size = sum(f.size for f in uploaded_files)
+        total_size_mb = total_size / (1024 * 1024)
+        st.sidebar.caption(f"**{len(uploaded_files)} file(s) selected** ({total_size_mb:.1f} MB total)")
+        
+        for f in uploaded_files:
+            icon = _get_file_icon(f.name)
+            size_mb = f.size / (1024 * 1024)
+            st.sidebar.caption(f"{icon} {f.name} ({size_mb:.1f} MB)")
+        
+        if st.sidebar.button("📤 Upload All", key="upload_btn", use_container_width=True):
+            success_count = 0
+            fail_count = 0
+            progress = st.sidebar.progress(0, text="Uploading...")
+            
+            for i, uploaded_file in enumerate(uploaded_files):
+                progress.progress(
+                    (i) / len(uploaded_files),
+                    text=f"Processing {uploaded_file.name} ({i+1}/{len(uploaded_files)})..."
+                )
+                try:
                     file_bytes = uploaded_file.read()
                     filename = uploaded_file.name
                     
-                    document = doc_service.upload_document(
+                    doc_service.upload_document(
                         file_bytes=file_bytes,
                         filename=filename,
                         user_id=user_id
                     )
+                    success_count += 1
                     
-                    st.sidebar.success(f"✅ {filename} uploaded successfully!")
-                    st.rerun()
-                    
-            except ValueError as e:
-                # Validation errors (duplicates, invalid file, etc.)
-                st.sidebar.error(f"❌ {str(e)}")
-            except RuntimeError as e:
-                # S3 or processing errors
-                st.sidebar.error(f"❌ {str(e)}")
-            except Exception as e:
-                logger.error(f"Upload error: {str(e)}", exc_info=True)
-                # Try to rollback session if available
-                try:
-                    doc_service.db.rollback()
-                except:
-                    pass
-                st.sidebar.error(f"❌ Upload failed: {str(e)}")
+                except ValueError as e:
+                    st.sidebar.error(f"❌ {filename}: {str(e)}")
+                    fail_count += 1
+                except RuntimeError as e:
+                    st.sidebar.error(f"❌ {filename}: {str(e)}")
+                    fail_count += 1
+                except Exception as e:
+                    logger.error(f"Upload error for {uploaded_file.name}: {str(e)}", exc_info=True)
+                    try:
+                        doc_service.db.rollback()
+                    except:
+                        pass
+                    st.sidebar.error(f"❌ {uploaded_file.name}: {str(e)}")
+                    fail_count += 1
+            
+            progress.progress(1.0, text="Done!")
+            
+            if success_count > 0:
+                st.sidebar.success(f"✅ {success_count} file(s) uploaded successfully!")
+                # Clear cached summary so it regenerates with new docs
+                st.session_state.pop("doc_summary", None)
+                st.session_state.pop("summary_feedback_given", None)
+                st.session_state.pop("summary_feedback_doc_count", None)
+                # Increment uploader key to clear file selection
+                st.session_state["uploader_key"] = st.session_state.get("uploader_key", 0) + 1
+            if fail_count > 0:
+                st.sidebar.warning(f"⚠️ {fail_count} file(s) failed")
+            
+            st.rerun()
     
     # List documents section
     st.sidebar.subheader("My Documents")
     
-    # Add refresh button
     col1, col2 = st.sidebar.columns([3, 1])
     with col2:
         if st.button("🔄", help="Refresh documents", key="refresh_docs"):
             st.rerun()
     
     try:
-        # Initialize deleted docs tracking in session state
         if "deleted_docs" not in st.session_state:
             st.session_state.deleted_docs = set()
         
         documents = doc_service.list_documents(user_id)
         
-        # Filter out deleted documents
         active_documents = [
             doc for doc in documents 
             if str(doc['document_id']) not in st.session_state.deleted_docs
         ]
         
         if not active_documents:
-            st.sidebar.info("📭 No documents uploaded yet.\n\nUpload a PDF above to get started!")
+            st.sidebar.info("🔭 No documents uploaded yet.\n\nUpload a file above to get started!")
         else:
             st.sidebar.markdown(f"**Total: {len(active_documents)} document(s)**")
             
-            # Display documents in a cleaner way
             for idx, doc in enumerate(active_documents):
                 doc_id_str = str(doc['document_id'])
-                with st.sidebar.expander(f"📄 {doc['filename'][:40]}{'...' if len(doc['filename']) > 40 else ''}"):
-                    # Document details
+                file_icon = _get_file_icon(doc['filename'])
+                display_name = doc['filename'][:40] + ('...' if len(doc['filename']) > 40 else '')
+                
+                with st.sidebar.expander(f"{file_icon} {display_name}"):
                     col1, col2 = st.columns([2, 1])
                     with col1:
                         st.caption(f"📅 {doc['upload_date'].strftime('%b %d, %Y')}")
@@ -186,33 +241,32 @@ def render_sidebar(doc_service: DocumentService, chat_service: ChatService, user
                     if doc['total_chunks']:
                         st.caption(f"📊 Chunks: {doc['total_chunks']}")
                     
-                    # Delete button
                     if st.button(
                         "🗑️ Delete",
                         key=f"del_{doc['document_id']}",
                         use_container_width=True
                     ):
-                        with st.spinner("Deleting document from S3, vectors, and database..."):
+                        with st.spinner("Deleting document..."):
                             try:
                                 success = doc_service.delete_document(doc['document_id'], user_id)
                                 if success:
-                                    # Track deleted document and remove from UI
                                     st.session_state.deleted_docs.add(doc_id_str)
-                                    st.sidebar.success("✅ Document deleted permanently")
+                                    # Clear cached summary so it regenerates
+                                    st.session_state.pop("doc_summary", None)
+                                    st.rerun()
                                 else:
-                                    st.sidebar.error("❌ Deletion failed - document still in use")
+                                    st.sidebar.error("❌ Deletion failed")
                             except Exception as e:
                                 logger.error(f"Delete error: {str(e)}", exc_info=True)
                                 st.sidebar.error(f"❌ Failed to delete: {str(e)}")
     
     except Exception as e:
         logger.error(f"Error loading documents: {str(e)}", exc_info=True)
-        # Try to recover session from bad state
         try:
             doc_service.db.rollback()
-            st.sidebar.warning(f"⚠️ Error loading documents (session recovered). Please refresh: {str(e)}")
+            st.sidebar.warning(f"⚠️ Error loading documents. Please refresh: {str(e)}")
         except:
-            st.sidebar.error(f"❌ Error loading documents (session corrupted): {str(e)}")
+            st.sidebar.error(f"❌ Error loading documents: {str(e)}")
     
     # ========== ACCOUNT SECTION ==========
     st.sidebar.markdown("---")
@@ -222,5 +276,3 @@ def render_sidebar(doc_service: DocumentService, chat_service: ChatService, user
         logger.info(f"User {user_id} requested sign out")
         st.session_state["force_logout"] = True
         st.rerun()
-
-

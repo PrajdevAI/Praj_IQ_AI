@@ -9,10 +9,11 @@ from typing import Optional
 from models.database_models import Document, DocumentChunk
 from security.encryption import encryption_manager
 from security.audit_logger import log_action
-from utils.pdf_parser import extract_text_from_pdf, validate_pdf
+from utils.file_parser import extract_text, validate_file, get_file_type
 from utils.chunking import chunk_text
 from utils.s3_client import S3Client
 from services.embedding_service import generate_embeddings
+from services.storage_service import StorageService
 from config.settings import settings
 
 logger = logging.getLogger(__name__)
@@ -22,13 +23,6 @@ class DocumentService:
     """Service for managing document uploads and processing."""
     
     def __init__(self, db: Session, tenant_id: uuid.UUID):
-        """
-        Initialize document service.
-        
-        Args:
-            db: Database session
-            tenant_id: Tenant identifier
-        """
         self.db = db
         self.tenant_id = tenant_id
         self.s3_client = S3Client()
@@ -54,10 +48,10 @@ class DocumentService:
         user_id: uuid.UUID
     ) -> Document:
         """
-        Upload and process PDF document.
+        Upload and process a document (PDF, DOCX, XLSX, CSV, TXT, images, etc.).
         
         Args:
-            file_bytes: PDF file bytes
+            file_bytes: File bytes
             filename: Original filename
             user_id: User ID
             
@@ -69,9 +63,16 @@ class DocumentService:
             RuntimeError: For S3 or processing errors
         """
         try:
-            # Validate PDF
-            if not validate_pdf(file_bytes):
-                raise ValueError("Invalid PDF file")
+            # Validate file type and content
+            if not validate_file(file_bytes, filename):
+                file_type = get_file_type(filename)
+                if file_type == "unknown":
+                    raise ValueError(
+                        f"Unsupported file type: {filename}. "
+                        f"Supported formats: PDF, DOCX, XLSX, CSV, TXT, MD, JSON, XML, HTML, "
+                        f"PNG, JPG, JPEG, TIFF, BMP, WEBP, SVG"
+                    )
+                raise ValueError(f"Invalid or corrupted file: {filename}")
             
             # Check file size
             file_size_mb = len(file_bytes) / (1024 * 1024)
@@ -86,7 +87,6 @@ class DocumentService:
                 raise ValueError("Document already uploaded for this tenant")
             
             # Clean up any soft-deleted records with this hash to avoid constraint violations
-            # (UNIQUE constraint includes soft-deleted rows)
             try:
                 old_deleted = self.db.query(Document).filter(
                     Document.tenant_id == self.tenant_id,
@@ -127,7 +127,7 @@ class DocumentService:
                 user_id=user_id,
                 document_hash=doc_hash,
                 encryption_key_id=settings.KMS_KEY_ID,
-                original_filename_encrypted=filename.encode('utf-8'),  # Plaintext for display (S3 key still encrypted)
+                original_filename_encrypted=filename.encode('utf-8'),
                 s3_bucket=settings.S3_BUCKET_NAME,
                 s3_key_encrypted=encryption_manager.encrypt_field(s3_key, data_key),
                 file_size_bytes=len(file_bytes)
@@ -135,7 +135,6 @@ class DocumentService:
             
             self.db.add(document)
             
-            # Re-apply RLS context before commit (handles connection pool reuse)
             from config.database import ensure_tenant_context
             ensure_tenant_context(self.db)
             
@@ -152,18 +151,24 @@ class DocumentService:
                 resource_id=document.document_id
             )
             
-            # Process document
-            self._process_document(document, file_bytes, data_key)
+            # Process document (extract text, chunk, embed)
+            self._process_document(document, file_bytes, filename, data_key)
             
-            logger.info(f"Document uploaded: {document.document_id}")
+            # Track storage usage
+            try:
+                storage_svc = StorageService(self.db, self.tenant_id)
+                storage_svc.record_upload(len(file_bytes))
+                self.db.commit()
+            except Exception as storage_err:
+                logger.warning(f"Storage tracking failed (non-blocking): {storage_err}")
+            
+            logger.info(f"Document uploaded: {document.document_id} ({filename})")
             return document
             
         except (ValueError, RuntimeError):
-            # These are expected validation/user errors, re-raise as-is
             self.db.rollback()
             raise
         except Exception as e:
-            # Unexpected errors: rollback session and provide context
             self.db.rollback()
             logger.error(f"Unexpected upload error: {type(e).__name__}: {str(e)}", exc_info=True)
             raise RuntimeError(f"Upload failed: {type(e).__name__}: {str(e)}")
@@ -172,15 +177,18 @@ class DocumentService:
         self,
         document: Document,
         file_bytes: bytes,
+        filename: str,
         data_key: bytes
     ):
         """Process document: extract text, chunk, generate embeddings."""
         try:
-            # Extract text
-            text = extract_text_from_pdf(file_bytes)
+            # Extract text using the universal file parser
+            text = extract_text(file_bytes, filename)
             
             if not text.strip():
-                raise ValueError("No text extracted from PDF")
+                raise ValueError(f"No text extracted from {filename}")
+            
+            logger.info(f"Extracted {len(text)} chars from {filename}")
             
             # Chunk text
             chunks = chunk_text(text, chunk_size=512, overlap=50)
@@ -198,7 +206,11 @@ class DocumentService:
                         chunk, data_key
                     ),
                     embedding=embedding,
-                    chunk_metadata={"chunk_index": idx, "total_chunks": len(chunks)}
+                    chunk_metadata={
+                        "source_file": filename,
+                        "chunk_index": idx,
+                        "total_chunks": len(chunks),
+                    },
                 )
                 self.db.add(chunk_record)
             
@@ -206,17 +218,15 @@ class DocumentService:
             document.total_chunks = len(chunks)
             document.processed_at = datetime.utcnow()
             
-            # Re-apply RLS context before commit
             from config.database import ensure_tenant_context
             ensure_tenant_context(self.db)
             
             self.db.commit()
             
-            logger.info(f"Document processed: {len(chunks)} chunks created")
+            logger.info(f"Document processed: {len(chunks)} chunks created from {filename}")
             
         except Exception as e:
-            logger.error(f"Document processing failed: {str(e)}")
-            # Mark document as failed but don't delete
+            logger.error(f"Document processing failed for {filename}: {str(e)}")
             raise
     
     def list_documents(self, user_id: uuid.UUID) -> list:
@@ -225,29 +235,24 @@ class DocumentService:
             from config.database import ensure_rls_for_query
             from sqlalchemy import text
             
-            # Ensure RLS context is set for this query
             ensure_rls_for_query(self.db)
             logger.info(f"Querying documents: tenant_id={self.tenant_id}, user_id={user_id}")
             
-            # DEBUG: Check if RLS is enabled
             if getattr(settings, 'ENABLE_RLS', True):
-                logger.info("RLS is ENABLED - row filtering should apply")
+                logger.info("RLS is ENABLED")
             else:
-                logger.warning("RLS is DISABLED - all rows may be visible")
+                logger.warning("RLS is DISABLED")
             
-            # DEBUG: Check current tenant context
             current_context = self.db.execute(
                 text("SELECT current_setting('app.current_tenant_id', true)")
             ).scalar()
             logger.info(f"DEBUG: Current RLS context: {current_context}")
             
-            # DEBUG: Raw count with explicit tenant/user filter
             raw_count = self.db.execute(
                 text(f"SELECT COUNT(*) FROM documents WHERE tenant_id = '{self.tenant_id}' AND user_id = '{user_id}' AND is_deleted = false")
             ).scalar()
             logger.info(f"DEBUG: Raw SQL count: {raw_count} documents for this user")
             
-            # Now do the ORM query 
             documents = self.db.query(Document).filter(
                 Document.tenant_id == self.tenant_id,
                 Document.user_id == user_id,
@@ -256,33 +261,25 @@ class DocumentService:
             
             logger.info(f"ORM query returned {len(documents)} documents")
             
-            # Diagnose chunk encryption status if documents exist
             if documents:
                 self.diagnose_chunks()
             
             result = []
             for doc in documents:
                 try:
-                    # Filename: Try UTF-8 decode first (new format), then decrypt (old format)
                     filename = None
                     if isinstance(doc.original_filename_encrypted, bytes):
-                        # Try UTF-8 decode first (new plaintext format)
                         try:
                             filename = doc.original_filename_encrypted.decode('utf-8')
-                            logger.debug(f"Decoded filename as plaintext: {filename}")
                         except UnicodeDecodeError:
-                            # Old format: encrypted binary. Try to decrypt
                             try:
                                 from security.encryption import encryption_manager
                                 data_key = encryption_manager.get_or_create_dek(str(self.tenant_id))
                                 filename = encryption_manager.decrypt_field(doc.original_filename_encrypted, data_key)
-                                logger.debug(f"Decrypted filename: {filename}")
                             except Exception as decrypt_err:
-                                # Both decode and decrypt failed, use document ID as fallback
-                                logger.warning(f"Could not decode/decrypt filename for {doc.document_id}: {str(decrypt_err)}. Using document_id as fallback.")
+                                logger.warning(f"Could not decode/decrypt filename for {doc.document_id}: {str(decrypt_err)}")
                                 filename = f"Document_{doc.document_id}"
                     else:
-                        # Already a string
                         filename = doc.original_filename_encrypted
                     
                     result.append({
@@ -292,7 +289,6 @@ class DocumentService:
                         'total_chunks': doc.total_chunks,
                         'processed': doc.processed_at is not None
                     })
-                    logger.debug(f"Added document: {filename}")
                 except Exception as e:
                     logger.error(f"Failed to process doc {doc.document_id}: {str(e)}")
                     continue
@@ -305,16 +301,14 @@ class DocumentService:
             raise
     
     def diagnose_chunks(self) -> dict:
-        """Diagnose chunk encryption status - helps debug why LLM can't find documents."""
+        """Diagnose chunk encryption status."""
         try:
             from sqlalchemy import text
             
-            # Count total chunks for this tenant
             total_chunks = self.db.execute(
                 text(f"SELECT COUNT(*) FROM document_chunks WHERE tenant_id = '{self.tenant_id}'")
             ).scalar()
             
-            # Try to decrypt a sample of chunks
             sample_chunks = self.db.query(DocumentChunk).filter(
                 DocumentChunk.tenant_id == self.tenant_id
             ).limit(3).all()
@@ -344,14 +338,10 @@ class DocumentService:
             return {"error": str(e)}
     
     def cleanup_undecryptable_chunks(self) -> int:
-        """
-        Remove chunks that can't be decrypted (old data with incompatible DEK).
-        This is necessary when DEK has changed and old chunks can't be recovered.
-        """
+        """Remove chunks that can't be decrypted."""
         from sqlalchemy import text
         
         try:
-            # Get all chunks for this tenant
             chunks = self.db.query(DocumentChunk).filter(
                 DocumentChunk.tenant_id == self.tenant_id
             ).all()
@@ -365,14 +355,13 @@ class DocumentService:
                 except Exception:
                     undecryptable.append(chunk.chunk_id)
             
-            # Delete undecryptable chunks
             if undecryptable:
                 chunk_ids_csv = ','.join(f"'{cid}'" for cid in undecryptable)
                 self.db.execute(
                     text(f"DELETE FROM document_chunks WHERE chunk_id IN ({chunk_ids_csv})")
                 )
                 self.db.commit()
-                logger.warning(f"Cleaned up {len(undecryptable)} undecryptable chunks for tenant {self.tenant_id}")
+                logger.warning(f"Cleaned up {len(undecryptable)} undecryptable chunks")
                 return len(undecryptable)
             
             return 0
@@ -382,16 +371,7 @@ class DocumentService:
             raise
     
     def delete_document(self, document_id: uuid.UUID, user_id: uuid.UUID) -> bool:
-        """
-        Fully delete document: S3 + vector chunks + database.
-        
-        Args:
-            document_id: Document to delete
-            user_id: User performing delete (for permission check)
-            
-        Returns:
-            True if deletion successful
-        """
+        """Fully delete document: S3 + vector chunks + database."""
         from services.delete_service import DeleteService
         
         delete_service = DeleteService(self.db, self.tenant_id)

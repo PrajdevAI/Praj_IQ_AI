@@ -7,10 +7,11 @@ from .database_models import (
     ChatSession,
     ChatMessage,
     Feedback,
-    AuditLog
+    AuditLog,
 )
 
 from .database_models import UserProfile
+from .database_models import TenantStorage
 
 __all__ = [
     'User',
@@ -19,7 +20,8 @@ __all__ = [
     'ChatSession',
     'ChatMessage',
     'Feedback',
-    'AuditLog'
+    'AuditLog',
+    'UserProfile',
+    'TenantStorage',
 ]
 
-__all__.append('UserProfile')
