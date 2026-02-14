@@ -273,6 +273,9 @@ class UserProfile(Base):
     company_email = Column(String(255), nullable=False)
     phone_number = Column(String(50), nullable=True)
 
+    # Tracks when user completed first-time summary feedback (NULL = not done yet)
+    summary_feedback_at = Column(DateTime, nullable=True)
+
     created_at = Column(DateTime, default=datetime.utcnow)
 
     def __repr__(self):

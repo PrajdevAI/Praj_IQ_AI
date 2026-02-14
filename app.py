@@ -46,20 +46,18 @@ st.markdown(
         border-radius: 0.5rem;
         margin-bottom: 0.5rem;
     }
-    .user-message {
-        background-color: #e3f2fd;
-    }
-    .assistant-message {
-        background-color: #f5f5f5;
-    }
-    .stButton button {
-        width: 100%;
-    }
+    .user-message { background-color: #e3f2fd; }
+    .assistant-message { background-color: #f5f5f5; }
+    .stButton button { width: 100%; }
 </style>
 """,
     unsafe_allow_html=True,
 )
 
+
+# =========================================================================
+# HELPER FUNCTIONS
+# =========================================================================
 
 def _extract_email_and_clerk_id(user_info: dict) -> tuple[str, str]:
     """Extract email + Clerk user id from validate_session() result."""
@@ -71,7 +69,6 @@ def _extract_email_and_clerk_id(user_info: dict) -> tuple[str, str]:
         or user_info.get("email_address")
         or user_info.get("primary_email")
     )
-    
     if not email:
         raise ValueError(f"Email not found in user_info keys: {list(user_info.keys())}")
 
@@ -81,7 +78,6 @@ def _extract_email_and_clerk_id(user_info: dict) -> tuple[str, str]:
         or user_info.get("id")
         or user_info.get("sub")
     )
-
     if not clerk_user_id:
         logger.info("clerk_user_id missing; will be generated from email")
         clerk_user_id = None
@@ -92,21 +88,14 @@ def _extract_email_and_clerk_id(user_info: dict) -> tuple[str, str]:
 def _clear_user_session_state():
     """Clear user-specific session state on user switch."""
     keys_to_clear = [
-        "current_session_id",
-        "tenant_id",
-        "user_id",
-        "db_user_id",
-        "chat_messages",
-        "profile_completed",
-        "doc_summary",
-        "summary_feedback_given",
-        "summary_feedback_doc_count",
-        "summary_reaction",
+        "current_session_id", "tenant_id", "user_id", "db_user_id",
+        "chat_messages", "profile_completed",
+        "doc_summary", "summary_feedback_given", "summary_feedback_doc_count",
+        "summary_reaction", "first_time_summary_done",
     ]
     for key in keys_to_clear:
         if key in st.session_state:
             del st.session_state[key]
-    logger.debug("Cleared user-specific session state")
 
 
 def _ensure_tables():
@@ -115,7 +104,6 @@ def _ensure_tables():
         from config.database import Base, engine
         from models import database_models  # noqa: F401
         Base.metadata.create_all(bind=engine)
-        logger.info("Ensured database tables exist")
     except Exception as e:
         logger.warning("Could not ensure DB tables: %s", e)
 
@@ -175,7 +163,6 @@ def _send_profile_notification(first_name, last_name, company_name, company_emai
             subject="New user profile submitted",
             body_text=body,
         )
-        logger.info("Profile notification email sent for user %s", str(user_id)[:8])
     except Exception as e:
         logger.warning("Failed to send profile notification email: %s", e)
 
@@ -208,7 +195,6 @@ def _save_profile(email, clerk_user_id, user_id, first_name, last_name, company_
             if attempt == 0 and ("user_profiles" in msg or "does not exist" in msg or "undefinedtable" in msg):
                 _ensure_tables()
                 continue
-            logger.error("Failed to save profile (attempt %d): %s", attempt + 1, e)
             raise
         finally:
             if db:
@@ -222,7 +208,7 @@ def _save_profile(email, clerk_user_id, user_id, first_name, last_name, company_
 def _show_profile_form(email, clerk_user_id, user_id):
     """Show mandatory profile form for first-time users."""
     st.title("📋 Complete Your Profile")
-    st.markdown("Please fill in your details before continuing to the PDF chat.")
+    st.markdown("Please fill in your details before continuing.")
     st.markdown("")
 
     with st.form(key="mandatory_profile_form"):
@@ -231,11 +217,11 @@ def _show_profile_form(email, clerk_user_id, user_id):
             first_name = st.text_input("First Name *", value="", placeholder="John")
         with col2:
             last_name = st.text_input("Last Name *", value="", placeholder="Doe")
-        
+
         company_name = st.text_input("Company Name *", value="", placeholder="Acadia Consultants")
         company_email = st.text_input("Company Email *", value=email, placeholder="john.doe@company.com")
         phone_number = st.text_input("Phone Number (optional)", value="", placeholder="+1-555-123-4567")
-        
+
         st.markdown("")
         submitted = st.form_submit_button("Submit and Continue", use_container_width=True)
 
@@ -280,11 +266,52 @@ def _show_profile_form(email, clerk_user_id, user_id):
 
 
 # =========================================================================
-# DOCUMENT SUMMARY + FEEDBACK
+# EMAIL HELPER — used by summary, inline chat, and sidebar feedback
+# =========================================================================
+
+def _send_feedback_email(
+    first_name, last_name, email, tenant_id,
+    feedback_type, rating, comments, context=""
+):
+    """
+    Send any feedback email to dev@acadiaconsultants.com.
+
+    feedback_type: 'summary', 'chat_inline', or 'general'
+    rating: '👍' or '👎' or emoji label
+    comments: user text (may be empty)
+    context: extra info (summary text, message text, etc.)
+    """
+    body = (
+        f"Feedback Received ({feedback_type})\n"
+        f"{'=' * 40}\n\n"
+        f"Tenant ID: {tenant_id}\n"
+        f"First Name: {first_name}\n"
+        f"Last Name: {last_name}\n"
+        f"User Email: {email}\n\n"
+        f"Rating: {rating}\n"
+        f"Comments: {comments or 'No comments provided'}\n\n"
+    )
+    if context:
+        body += f"{'=' * 40}\nContext:\n{context}\n"
+
+    try:
+        import utils.email_sender as _es
+        _es.email_sender.send_email(
+            to_email="dev@acadiaconsultants.com",
+            subject=f"Feedback ({feedback_type}): {rating} from {first_name} {last_name}",
+            body_text=body,
+        )
+        logger.info("Feedback email sent: type=%s rating=%s", feedback_type, rating)
+    except Exception as e:
+        logger.warning("Failed to send feedback email: %s", e)
+
+
+# =========================================================================
+# DOCUMENT SUMMARY (shown for all users, feedback gate FIRST TIME ONLY)
 # =========================================================================
 
 def _generate_document_summary(rag_service, doc_list) -> str:
-    """Generate a concise 2-3 line summary of uploaded documents using the LLM."""
+    """Generate a concise 2-3 line summary of uploaded documents."""
     if not doc_list:
         return ""
 
@@ -307,60 +334,65 @@ def _generate_document_summary(rag_service, doc_list) -> str:
         )
 
 
-def _send_summary_feedback_email(
-    first_name, last_name, email, tenant_id, rating_emoji, rating_label, comments, doc_summary
-):
-    """Send summary feedback email to dev@acadiaconsultants.com."""
-    body = (
-        f"Document Summary Feedback\n"
-        f"{'=' * 40}\n\n"
-        f"Tenant ID: {tenant_id}\n"
-        f"First Name: {first_name}\n"
-        f"Last Name: {last_name}\n"
-        f"User Email: {email}\n\n"
-        f"Rating: {rating_emoji} {rating_label}\n\n"
-        f"Comments:\n{comments or 'No comments provided'}\n\n"
-        f"{'=' * 40}\n"
-        f"Document Summary:\n{doc_summary}\n"
-    )
-
+def _is_first_time_user(db, user_id) -> bool:
+    """
+    Check if this is the user's very first session (no prior summary feedback).
+    We track this via a 'summary_feedback_at' column on user_profiles.
+    Falls back to session_state flag if column doesn't exist yet.
+    """
     try:
-        import utils.email_sender as _es
-        _es.email_sender.send_email(
-            to_email="dev@acadiaconsultants.com",
-            subject=f"Summary Feedback: {rating_emoji} {rating_label} from {first_name} {last_name}",
-            body_text=body,
-        )
-        logger.info("Summary feedback email sent: %s %s", rating_emoji, rating_label)
+        profile = db.query(UserProfile).filter(UserProfile.user_id == user_id).first()
+        if profile and hasattr(profile, "summary_feedback_at") and profile.summary_feedback_at:
+            return False
+        # Column may not exist yet — check session state
+        return not st.session_state.get("first_time_summary_done", False)
+    except Exception:
+        return not st.session_state.get("first_time_summary_done", False)
+
+
+def _mark_summary_feedback_done(db, user_id):
+    """Mark that user has completed first-time summary feedback."""
+    st.session_state["first_time_summary_done"] = True
+    try:
+        profile = db.query(UserProfile).filter(UserProfile.user_id == user_id).first()
+        if profile and hasattr(profile, "summary_feedback_at"):
+            from datetime import datetime
+            profile.summary_feedback_at = datetime.utcnow()
+            db.commit()
     except Exception as e:
-        logger.warning("Failed to send summary feedback email: %s", e)
+        logger.debug("Could not persist summary_feedback_at (non-critical): %s", e)
+        try:
+            db.rollback()
+        except Exception:
+            pass
 
 
 def _render_summary_and_feedback(
-    rag_service, doc_service, user_id, first_name, last_name, email, tenant_id
+    rag_service, doc_service, db, user_id,
+    first_name, last_name, email, tenant_id
 ):
     """
-    Render document summary with feedback gate.
-    Returns True if feedback given (chat unlocked), False if waiting.
+    Render document summary.
+    Feedback gate only for FIRST-TIME users.
+    Existing users always have chat unlocked.
+
+    Returns True if chat should be unlocked.
     """
     doc_list = doc_service.list_documents(user_id)
 
     if not doc_list:
         st.info("📂 No documents uploaded yet. Upload documents from the sidebar to get started!")
-        return True  # No docs = no summary needed, chat open
+        return True  # No docs = chat open (nothing to chat about anyway)
 
     current_doc_count = len(doc_list)
 
-    # Reset feedback gate if new documents uploaded
+    # Regenerate summary if docs changed
     prev_doc_count = st.session_state.get("summary_feedback_doc_count", 0)
-    feedback_given = st.session_state.get("summary_feedback_given", False)
-
     if current_doc_count != prev_doc_count and prev_doc_count > 0:
-        feedback_given = False
-        st.session_state["summary_feedback_given"] = False
         st.session_state.pop("doc_summary", None)
         st.session_state.pop("summary_reaction", None)
-        logger.info("New documents detected — resetting feedback gate")
+
+    st.session_state["summary_feedback_doc_count"] = current_doc_count
 
     # ── Document Summary ──
     st.markdown("### 📑 Summary of Your Documents")
@@ -380,76 +412,68 @@ def _render_summary_and_feedback(
         unsafe_allow_html=True,
     )
 
-    # ── Feedback Gate ──
-    if not feedback_given:
-        st.markdown("**How was this summary?**")
+    # ── Check if first-time user ──
+    is_first_time = _is_first_time_user(db, user_id)
 
-        col_like, col_dislike, col_spacer = st.columns([1, 1, 6])
-        with col_like:
-            if st.button("👍", key="summary_like", help="Good summary"):
-                st.session_state["summary_reaction"] = "like"
-                st.rerun()
-        with col_dislike:
-            if st.button("👎", key="summary_dislike", help="Poor summary"):
-                st.session_state["summary_reaction"] = "dislike"
-                st.rerun()
+    if not is_first_time:
+        # Existing user — always show summary, never gate chat
+        return True
 
-        reaction = st.session_state.get("summary_reaction")
-        if reaction:
-            st.markdown("---")
-            st.markdown("#### 📝 Share Your Feedback")
+    # ── FIRST TIME ONLY: feedback gate ──
+    feedback_given = st.session_state.get("summary_feedback_given", False)
+    if feedback_given:
+        return True
 
-            rating_options = {
-                "😄 Excellent": ("😄", "Excellent"),
-                "🙂 Good": ("🙂", "Good"),
-                "😐 Okay": ("😐", "Okay"),
-                "😞 Bad": ("😞", "Bad"),
-            }
+    st.markdown("**How was this summary?**")
 
-            default_idx = 1 if reaction == "like" else 3
-
-            selected_rating = st.radio(
-                "Rate the summary:",
-                list(rating_options.keys()),
-                index=default_idx,
-                horizontal=True,
-                key="summary_rating_radio",
+    col_like, col_dislike, col_spacer = st.columns([1, 1, 6])
+    with col_like:
+        if st.button("👍", key="summary_like", help="Good summary"):
+            # Like = send email immediately, unlock chat
+            _send_feedback_email(
+                first_name=first_name, last_name=last_name, email=email,
+                tenant_id=str(tenant_id), feedback_type="summary",
+                rating="👍 Good", comments="", context=summary,
             )
+            st.session_state["summary_feedback_given"] = True
+            _mark_summary_feedback_done(db, user_id)
+            st.success("✅ Thanks! Chat is now unlocked.")
+            st.rerun()
 
-            feedback_comments = st.text_area(
-                "Any suggestions or comments? (optional)",
-                placeholder="Tell us how we can improve...",
-                key="summary_feedback_comments",
-            )
+    with col_dislike:
+        if st.button("👎", key="summary_dislike", help="Poor summary"):
+            st.session_state["summary_reaction"] = "dislike"
+            st.rerun()
 
-            if st.button("✅ Submit Feedback", key="submit_summary_feedback", use_container_width=True):
-                emoji, label = rating_options[selected_rating]
-
-                _send_summary_feedback_email(
-                    first_name=first_name,
-                    last_name=last_name,
-                    email=email,
-                    tenant_id=str(tenant_id),
-                    rating_emoji=emoji,
-                    rating_label=label,
-                    comments=feedback_comments,
-                    doc_summary=summary,
-                )
-
-                st.session_state["summary_feedback_given"] = True
-                st.session_state["summary_feedback_doc_count"] = current_doc_count
-                st.session_state.pop("summary_reaction", None)
-
-                st.success("✅ Thank you for your feedback! Chat is now unlocked.")
-                st.rerun()
-
-        # Chat LOCKED
+    # If disliked — show ONLY comment box (no rating section)
+    reaction = st.session_state.get("summary_reaction")
+    if reaction == "dislike":
         st.markdown("---")
-        st.warning("💬 **Chat is locked.** Please provide feedback on the summary above to unlock the chat.")
-        return False
+        st.markdown("#### 📝 What could be improved?")
 
-    # Feedback already given — chat unlocked
-    return True
+        feedback_comments = st.text_area(
+            "Your feedback (optional)",
+            placeholder="Tell us how we can improve the summary...",
+            key="summary_dislike_comments",
+        )
+
+        if st.button("✅ Submit Feedback", key="submit_summary_dislike", use_container_width=True):
+            _send_feedback_email(
+                first_name=first_name, last_name=last_name, email=email,
+                tenant_id=str(tenant_id), feedback_type="summary",
+                rating="👎 Needs Improvement", comments=feedback_comments,
+                context=summary,
+            )
+            st.session_state["summary_feedback_given"] = True
+            st.session_state.pop("summary_reaction", None)
+            _mark_summary_feedback_done(db, user_id)
+            st.success("✅ Thanks for your feedback! Chat is now unlocked.")
+            st.rerun()
+
+    # Chat LOCKED until feedback
+    st.markdown("---")
+    st.warning("💬 **Chat is locked.** Please provide feedback on the summary above to unlock the chat.")
+    return False
 
 
 # =========================================================================
@@ -474,7 +498,6 @@ def main():
 
     # 3) Handle logout
     if st.session_state.get("force_logout", False):
-        logger.info("Processing logout request")
         try:
             auth_manager.logout()
         except Exception as e:
@@ -486,7 +509,6 @@ def main():
     # 4) Validate session
     user_info = auth_manager.validate_session()
     if not user_info:
-        logger.info("User not authenticated, showing login page")
         show_login_page()
         st.stop()
 
@@ -503,7 +525,6 @@ def main():
     # 6) Detect user switch
     previous_email = st.session_state.get("email")
     if previous_email and previous_email != email:
-        logger.info("🔄 User switch: %s → %s", previous_email[:15], email[:15])
         _clear_user_session_state()
 
     st.session_state["email"] = email
@@ -546,22 +567,17 @@ def main():
         first_name = profile.first_name if profile else "there"
         last_name = profile.last_name if profile else ""
 
-        if settings.ENVIRONMENT == "development":
-            try:
-                from sqlalchemy import text
-                tenant_check = db.execute(
-                    text("SELECT current_setting('app.current_tenant_id', true)")
-                ).scalar()
-                if tenant_check:
-                    logger.debug("RLS context verified: %s", tenant_check[:8])
-            except Exception as e:
-                logger.warning("Could not verify RLS context: %s", e)
-
         # 10) Initialize services
         doc_service = DocumentService(db, tenant_id)
         rag_service = RAGService(db, tenant_id)
         chat_service = ChatService(db, tenant_id, user_id)
         feedback_service = FeedbackService(db, tenant_id, user_id)
+
+        # Store user info in session state for chat_interface inline feedback
+        st.session_state["_fb_first_name"] = first_name
+        st.session_state["_fb_last_name"] = last_name
+        st.session_state["_fb_email"] = email
+        st.session_state["_fb_tenant_id"] = str(tenant_id)
 
         # 11) Personalized greeting
         st.title(f"👋 Welcome, {first_name}!")
@@ -579,10 +595,11 @@ def main():
             st.markdown("---")
             render_sidebar(doc_service, chat_service, user_id)
 
-        # 12) Summary + Feedback Gate
+        # 12) Summary + Feedback Gate (first-time only)
         chat_unlocked = _render_summary_and_feedback(
             rag_service=rag_service,
             doc_service=doc_service,
+            db=db,
             user_id=user_id,
             first_name=first_name,
             last_name=last_name,
@@ -590,14 +607,14 @@ def main():
             tenant_id=tenant_id,
         )
 
-        # 13) Chat — only if feedback given
+        # 13) Chat — only if unlocked
         if chat_unlocked:
             st.markdown("---")
             st.markdown("### 💬 Chat")
             try:
                 current_session_id = st.session_state.get("current_session_id")
                 session_id = None
-                
+
                 if current_session_id:
                     try:
                         session_uuid = uuid.UUID(current_session_id)
@@ -615,7 +632,7 @@ def main():
                     session = chat_service.get_active_session()
                     session_id = session.session_id
                     st.session_state["current_session_id"] = str(session_id)
-                
+
                 render_chat_interface(chat_service, rag_service, session_id)
             except Exception as e:
                 logger.error("Chat interface error: %s", e, exc_info=True)
