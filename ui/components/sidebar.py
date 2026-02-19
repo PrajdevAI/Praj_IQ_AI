@@ -53,7 +53,7 @@ def _send_general_feedback_email(rating, comments):
     try:
         import utils.email_sender as _es
         _es.email_sender.send_email(
-            to_email="dev@acadiaconsultants.com",
+            to_email="dev@praj.ai",
             subject=f"General Feedback: {rating} from {first_name} {last_name}",
             body_text=body,
         )
@@ -325,10 +325,10 @@ def render_sidebar(doc_service: DocumentService, chat_service: ChatService, user
             st.rerun()
 
     # ========== ACCOUNT SECTION ==========
-    st.sidebar.markdown("---")
-    st.sidebar.markdown("### Account")
+    # st.sidebar.markdown("---")
+    # st.sidebar.markdown("### Account")
 
-    if st.sidebar.button("🚪 Sign Out", use_container_width=True):
-        logger.info(f"User {user_id} requested sign out")
-        st.session_state["force_logout"] = True
-        st.rerun()
+    # if st.sidebar.button("🚪 Sign Out", use_container_width=True):
+    #     logger.info(f"User {user_id} requested sign out")
+    #     st.session_state["force_logout"] = True
+    #     st.rerun()

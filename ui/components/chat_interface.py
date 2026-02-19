@@ -35,7 +35,7 @@ def _send_inline_feedback(rating: str, msg_index: int, msg_text: str = ""):
     try:
         import utils.email_sender as _es
         _es.email_sender.send_email(
-            to_email="dev@acadiaconsultants.com",
+            to_email="dev@praj.ai",
             subject=f"Chat Feedback: {rating} from {first_name} {last_name}",
             body_text=body,
         )
@@ -53,7 +53,7 @@ def render_chat_interface(
     Render chat interface with auto-titling and inline feedback.
     
     Shows 👍/👎 after every 5th assistant response. One-click sends
-    feedback to dev@acadiaconsultants.com without blocking chat.
+    feedback to dev@praj.ai without blocking chat.
     """
     # Track which messages have already received feedback
     if "inline_feedback_given" not in st.session_state:

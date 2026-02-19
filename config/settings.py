@@ -52,7 +52,7 @@ class Settings(BaseSettings):
     KMS_KEY_ID: str
     
     # Email Configuration
-    DEVELOPER_EMAIL: str = "dev@acadiaconsultants.com"
+    DEVELOPER_EMAIL: str = "dev@praj.ai"
     SES_SENDER_EMAIL: str
     SES_REGION: str = "us-east-1"
     EMAIL_HASH_KEY: str = ""

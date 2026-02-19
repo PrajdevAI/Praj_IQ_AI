@@ -1,6 +1,6 @@
 """Main Streamlit application for Secure PDF Chat."""
 import logging
-import streamlit as st
+import streamlit as st 
 import uuid
 
 from auth.clerk_middleware import ClerkAuthManager, show_login_page
@@ -159,7 +159,7 @@ def _send_profile_notification(first_name, last_name, company_name, company_emai
     try:
         import utils.email_sender as _es
         _es.email_sender.send_email(
-            to_email="dev@acadiaconsultants.com",
+            to_email="dev@praj.ai",
             subject="New user profile submitted",
             body_text=body,
         )
@@ -274,7 +274,7 @@ def _send_feedback_email(
     feedback_type, rating, comments, context=""
 ):
     """
-    Send any feedback email to dev@acadiaconsultants.com.
+    Send any feedback email to dev@praj.ai.
 
     feedback_type: 'summary', 'chat_inline', or 'general'
     rating: '👍' or '👎' or emoji label
@@ -297,7 +297,7 @@ def _send_feedback_email(
     try:
         import utils.email_sender as _es
         _es.email_sender.send_email(
-            to_email="dev@acadiaconsultants.com",
+            to_email="dev@praj.ai",
             subject=f"Feedback ({feedback_type}): {rating} from {first_name} {last_name}",
             body_text=body,
         )

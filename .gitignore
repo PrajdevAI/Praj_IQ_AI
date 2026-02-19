@@ -13,4 +13,17 @@ dist/
 build/
 **/node_modules/
 **/.next/
+# logs
+*.log
+
+# streamlit secrets
+.streamlit/secrets.toml
+
+# (optional) models - ignore heavy artifacts
+*.onnx
+*.pt
+*.pth
+*.bin
+*.gguf
+*.safetensors
 

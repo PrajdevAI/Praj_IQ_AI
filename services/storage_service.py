@@ -204,7 +204,7 @@ class StorageService:
 
         When implemented, this should:
         1. Send email to the tenant user (To:)
-        2. CC dev@acadiaconsultants.com
+        2. CC dev@praj.ai
         3. Include current usage, threshold, and recommendation
         4. Update record.last_alert_sent_at to avoid spamming
         5. Only send once per threshold crossing (check last_alert_sent_at)
