@@ -20,7 +20,7 @@ class EmbeddingService:
         #     aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
         #     aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY
         # )
-        self.kms_client = boto3.client("bedrock-runtime", region_name=settings.AWS_REGION)
+        self.bedrock = boto3.client("bedrock-runtime", region_name=settings.AWS_REGION)
         self.model_id = settings.BEDROCK_EMBEDDING_MODEL
     
     def generate_embedding(self, text: str) -> List[float]:
