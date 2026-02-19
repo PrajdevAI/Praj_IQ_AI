@@ -388,12 +388,16 @@ def _extract_from_image(file_bytes: bytes, filename: str) -> str:
         import boto3
         from config.settings import settings
 
+        # textract = boto3.client(
+        #     "textract",
+        #     region_name=settings.AWS_REGION,
+        #     aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
+        #     aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
+        # )
         textract = boto3.client(
             "textract",
             region_name=settings.AWS_REGION,
-            aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
-            aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
-        )
+            )
 
         response = textract.detect_document_text(Document={"Bytes": file_bytes})
         blocks = response.get("Blocks", [])

@@ -13,12 +13,13 @@ class KMSManager:
     
     def __init__(self):
         """Initialize KMS client."""
-        self.kms_client = boto3.client(
-            'kms',
-            region_name=settings.AWS_REGION,
-            aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
-            aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY
-        )
+        # self.kms_client = boto3.client(
+        #     'kms',
+        #     region_name=settings.AWS_REGION,
+        #     aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
+        #     aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY
+        # )
+        self.kms_client = boto3.client("kms", region_name=settings.AWS_REGION)
         self.master_key_id = settings.KMS_KEY_ID
     
     def generate_data_key(self, tenant_id: str) -> Tuple[bytes, bytes]:

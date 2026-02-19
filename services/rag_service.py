@@ -21,13 +21,13 @@ class RAGService:
     def __init__(self, db: Session, tenant_id: uuid.UUID):
         self.db = db
         self.tenant_id = tenant_id
-        self.bedrock = boto3.client(
-            'bedrock-runtime',
-            region_name=settings.AWS_REGION,
-            aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
-            aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY
-        )
-    
+        # self.bedrock = boto3.client(
+        #     'bedrock-runtime',
+        #     region_name=settings.AWS_REGION,
+        #     aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
+        #     aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY
+        # )
+        self.kms_client = boto3.client("bedrock-runtime", region_name=settings.AWS_REGION)
     def retrieve_relevant_chunks(
         self, 
         query: str, 

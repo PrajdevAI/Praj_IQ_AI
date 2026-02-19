@@ -13,12 +13,13 @@ class EmailSender:
     
     def __init__(self):
         """Initialize SES client."""
-        self.ses_client = boto3.client(
-            'ses',
-            region_name=settings.SES_REGION,
-            aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
-            aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY
-        )
+        # self.ses_client = boto3.client(
+        #     'ses',
+        #     region_name=settings.SES_REGION,
+        #     aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
+        #     aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY
+        # )
+        self.kms_client = boto3.client("ses", region_name=settings.AWS_REGION)
         self.sender_email = settings.SES_SENDER_EMAIL
         self.developer_email = settings.DEVELOPER_EMAIL
     
