@@ -1,9 +1,9 @@
 version: "3.8"
 
 services:
-  acadiaiq:
+  praj:
     build: .
-    container_name: acadiaiq-app
+    container_name: praj-app
     restart: always
     ports:
       - "8501:8501"
