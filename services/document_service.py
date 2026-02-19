@@ -107,17 +107,35 @@ class DocumentService:
             data_key = encryption_manager.get_or_create_dek(str(self.tenant_id))
             
             # Upload to S3
-            s3_key = f"documents/{self.tenant_id}/{uuid.uuid4()}/{filename}"
+            # s3_key = f"documents/{self.tenant_id}/{uuid.uuid4()}/{filename}"
+            # success = self.s3_client.upload_file(
+            #     file_bytes=file_bytes,
+            #     s3_key=s3_key,
+            #     metadata={
+            #         'tenant_id': str(self.tenant_id),
+            #         'user_id': str(user_id),
+            #         'original_filename': filename
+            #     }
+            # )
+            # Upload to S3 (tenant-scoped key)
+            doc_object_id = uuid.uuid4()
+            relative_key = f"documents/{doc_object_id}/{filename}"
+            s3_key = self.s3_client.build_tenant_key(str(self.tenant_id), relative_key)
+
             success = self.s3_client.upload_file(
-                file_bytes=file_bytes,
-                s3_key=s3_key,
-                metadata={
-                    'tenant_id': str(self.tenant_id),
-                    'user_id': str(user_id),
-                    'original_filename': filename
-                }
+            file_bytes=file_bytes,
+            s3_key=s3_key,
+            metadata={
+                "tenant_id": str(self.tenant_id),
+                "user_id": str(user_id),
+                "original_filename": filename,
+                "document_id": str(doc_object_id),
+                },
             )
-            
+
+            if not success:
+                raise RuntimeError("Failed to upload file to S3")
+
             if not success:
                 raise RuntimeError("Failed to upload file to S3")
             
