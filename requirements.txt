@@ -124,3 +124,4 @@ faker>=23.2.1
 python-docx>=1.1.0
 openpyxl>=3.1.2
 Pillow>=10.0.0
+pytesseract
