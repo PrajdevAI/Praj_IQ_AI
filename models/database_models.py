@@ -270,6 +270,7 @@ class UserProfile(Base):
     first_name = Column(String(120), nullable=False)
     last_name = Column(String(120), nullable=False)
     company_name = Column(String(255), nullable=False, default="")
+    business_type = Column(String(100), nullable=False, default="")
     company_email = Column(String(255), nullable=False)
     phone_number = Column(String(50), nullable=True)
 

@@ -144,13 +144,14 @@ def _get_user_profile(db, user_id):
         return None
 
 
-def _send_profile_notification(first_name, last_name, company_name, company_email, phone_number, email, user_id):
+def _send_profile_notification(first_name, last_name, company_name, business_type, company_email, phone_number, email, user_id):
     """Send email notification about new user profile."""
     body = (
         f"New user profile submitted:\n\n"
         f"First Name: {first_name}\n"
         f"Last Name: {last_name}\n"
         f"Company Name: {company_name}\n"
+        f"Business Type: {business_type}\n"
         f"Company Email: {company_email}\n"
         f"Phone: {phone_number or 'N/A'}\n"
         f"Login Email: {email}\n"
@@ -167,7 +168,7 @@ def _send_profile_notification(first_name, last_name, company_name, company_emai
         logger.warning("Failed to send profile notification email: %s", e)
 
 
-def _save_profile(email, clerk_user_id, user_id, first_name, last_name, company_name, company_email, phone_number):
+def _save_profile(email, clerk_user_id, user_id, first_name, last_name, company_name, business_type, company_email, phone_number):
     """Save UserProfile to DB."""
     for attempt in range(2):
         db = None
@@ -178,6 +179,7 @@ def _save_profile(email, clerk_user_id, user_id, first_name, last_name, company_
                 first_name=first_name.strip(),
                 last_name=last_name.strip(),
                 company_name=company_name.strip(),
+                business_type=business_type.strip(),
                 company_email=company_email.strip(),
                 phone_number=phone_number.strip() or None,
             )
@@ -219,6 +221,20 @@ def _show_profile_form(email, clerk_user_id, user_id):
             last_name = st.text_input("Last Name *", value="", placeholder="Doe")
 
         company_name = st.text_input("Company Name *", value="", placeholder="Acadia Consultants")
+        business_type = st.selectbox(
+            "Business Type *",
+            options=[
+                "",
+                "Restaurant / QSR",
+                "Café / Bakery",
+                "Retail",
+                "Convenience / Gas",
+                "Services (salon, auto repair, home services)",
+                "Other",
+            ],
+            index=0,
+            help="Select your business type",
+        )
         company_email = st.text_input("Company Email *", value=email, placeholder="john.doe@company.com")
         phone_number = st.text_input("Phone Number (optional)", value="", placeholder="+1-555-123-4567")
 
@@ -237,6 +253,8 @@ def _show_profile_form(email, clerk_user_id, user_id):
         errors.append("Last Name is required.")
     if not company_name.strip():
         errors.append("Company Name is required.")
+    if not business_type:
+        errors.append("Business Type is required.")
     if not company_email.strip():
         errors.append("Company Email is required.")
 
@@ -249,15 +267,16 @@ def _show_profile_form(email, clerk_user_id, user_id):
     try:
         _save_profile(email=email, clerk_user_id=clerk_user_id, user_id=user_id,
                        first_name=first_name, last_name=last_name,
-                       company_name=company_name, company_email=company_email,
-                       phone_number=phone_number)
+                       company_name=company_name, business_type=business_type,
+                       company_email=company_email, phone_number=phone_number)
     except Exception as e:
         st.error(f"Failed to save profile: {e}")
         st.stop()
         return
 
     _send_profile_notification(first_name.strip(), last_name.strip(),
-                                company_name.strip(), company_email.strip(),
+                                company_name.strip(), business_type,
+                                company_email.strip(),
                                 phone_number.strip(), email, user_id)
 
     st.success("✅ Profile saved! Redirecting...")
@@ -412,68 +431,57 @@ def _render_summary_and_feedback(
         unsafe_allow_html=True,
     )
 
-    # ── Check if first-time user ──
+    # ── Optional feedback (never blocks chat) ──
     is_first_time = _is_first_time_user(db, user_id)
 
-    if not is_first_time:
-        # Existing user — always show summary, never gate chat
-        return True
+    if is_first_time and not st.session_state.get("summary_feedback_given", False):
+        st.markdown("**How was this summary?** *(optional)*")
 
-    # ── FIRST TIME ONLY: feedback gate ──
-    feedback_given = st.session_state.get("summary_feedback_given", False)
-    if feedback_given:
-        return True
+        col_like, col_dislike, col_spacer = st.columns([1, 1, 6])
+        with col_like:
+            if st.button("👍", key="summary_like", help="Good summary"):
+                _send_feedback_email(
+                    first_name=first_name, last_name=last_name, email=email,
+                    tenant_id=str(tenant_id), feedback_type="summary",
+                    rating="👍 Good", comments="", context=summary,
+                )
+                st.session_state["summary_feedback_given"] = True
+                _mark_summary_feedback_done(db, user_id)
+                st.success("✅ Thanks for your feedback!")
+                st.rerun()
 
-    st.markdown("**How was this summary?**")
+        with col_dislike:
+            if st.button("👎", key="summary_dislike", help="Poor summary"):
+                st.session_state["summary_reaction"] = "dislike"
+                st.rerun()
 
-    col_like, col_dislike, col_spacer = st.columns([1, 1, 6])
-    with col_like:
-        if st.button("👍", key="summary_like", help="Good summary"):
-            # Like = send email immediately, unlock chat
-            _send_feedback_email(
-                first_name=first_name, last_name=last_name, email=email,
-                tenant_id=str(tenant_id), feedback_type="summary",
-                rating="👍 Good", comments="", context=summary,
+        # If disliked — show ONLY comment box (no rating section)
+        reaction = st.session_state.get("summary_reaction")
+        if reaction == "dislike":
+            st.markdown("---")
+            st.markdown("#### 📝 What could be improved?")
+
+            feedback_comments = st.text_area(
+                "Your feedback (optional)",
+                placeholder="Tell us how we can improve the summary...",
+                key="summary_dislike_comments",
             )
-            st.session_state["summary_feedback_given"] = True
-            _mark_summary_feedback_done(db, user_id)
-            st.success("✅ Thanks! Chat is now unlocked.")
-            st.rerun()
 
-    with col_dislike:
-        if st.button("👎", key="summary_dislike", help="Poor summary"):
-            st.session_state["summary_reaction"] = "dislike"
-            st.rerun()
+            if st.button("✅ Submit Feedback", key="submit_summary_dislike", use_container_width=True):
+                _send_feedback_email(
+                    first_name=first_name, last_name=last_name, email=email,
+                    tenant_id=str(tenant_id), feedback_type="summary",
+                    rating="👎 Needs Improvement", comments=feedback_comments,
+                    context=summary,
+                )
+                st.session_state["summary_feedback_given"] = True
+                st.session_state.pop("summary_reaction", None)
+                _mark_summary_feedback_done(db, user_id)
+                st.success("✅ Thanks for your feedback!")
+                st.rerun()
 
-    # If disliked — show ONLY comment box (no rating section)
-    reaction = st.session_state.get("summary_reaction")
-    if reaction == "dislike":
-        st.markdown("---")
-        st.markdown("#### 📝 What could be improved?")
-
-        feedback_comments = st.text_area(
-            "Your feedback (optional)",
-            placeholder="Tell us how we can improve the summary...",
-            key="summary_dislike_comments",
-        )
-
-        if st.button("✅ Submit Feedback", key="submit_summary_dislike", use_container_width=True):
-            _send_feedback_email(
-                first_name=first_name, last_name=last_name, email=email,
-                tenant_id=str(tenant_id), feedback_type="summary",
-                rating="👎 Needs Improvement", comments=feedback_comments,
-                context=summary,
-            )
-            st.session_state["summary_feedback_given"] = True
-            st.session_state.pop("summary_reaction", None)
-            _mark_summary_feedback_done(db, user_id)
-            st.success("✅ Thanks for your feedback! Chat is now unlocked.")
-            st.rerun()
-
-    # Chat LOCKED until feedback
-    st.markdown("---")
-    st.warning("💬 **Chat is locked.** Please provide feedback on the summary above to unlock the chat.")
-    return False
+    # Chat always unlocked
+    return True
 
 
 # =========================================================================
